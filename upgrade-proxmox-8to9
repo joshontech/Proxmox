@@ -1,74 +1,118 @@
-#!/bin/sh
+#!/bin/bash
+set -euo pipefail
 
-# Pre-rec Checking.
-echo "Checking Proxmox version..."
-pve_version=$(pveversion | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+##############################################
+# Functions
+##############################################
 
-if [[ "$pve_version" < 8.4.1 ]]; then
-  echo "Your pve version is not 8.4.1 or higher exiting script..."
-  exit 1
-elif [[ "$pve_version" >= 9 ]]; then
-  echo "Your pve version is 9 or greater."
-  echo "Congratulations you have already upgraded!"
-  echo "Exiting script..."
-else
-  echo "Your pve version is 8.4.1 or newer continuing..."    
-fi
+error_exit() {
+    echo "ERROR: $1"
+    exit 1
+}
 
-# Step 1: Check to see if upgrade is safe to be done.
+confirm() {
+    while true; do
+        read -rp "$1 (y/n) " answer
+        case "$answer" in
+            [Yy]* ) return 0 ;;
+            [Nn]* ) echo "Exiting..."; exit 0 ;;
+            * ) echo "Please answer y or n." ;;
+        esac
+    done
+}
+
+##############################################
+# Step 1: Pre‑flight check
+##############################################
+
+echo "Running Proxmox 8→9 pre‑flight check..."
 pve8to9 --full
 
-read -p "Continue? (y/n) " answer
+confirm "Continue with upgrade"
 
-case "$answer" in
-    [Yy]* ) echo "Continuing...";;
-    [Nn]* ) echo "Exiting..."; exit;;
-    * ) echo "Please answer y or n.";;
-esac
+##############################################
+# Step 2: Update system before switching repos
+##############################################
 
-# Step 2: Update and Upgrade before going to 9
-echo "Running system update..."
+echo "Updating package lists..."
 apt update
 
-echo "Running system dist-upgrade..."n
-apt dist-upgrade
+echo "Running dist-upgrade..."
+apt dist-upgrade -y
 
-# Step 3: Get debian versions for replacement in sources.list
+##############################################
+# Step 3: Determine current and target Debian versions
+##############################################
+
+# Extract current codename from first deb entry
+if ! grep -q "^deb " /etc/apt/sources.list; then
+    error_exit "No deb entries found in /etc/apt/sources.list"
+fi
+
 old_repo=$(grep "^deb " /etc/apt/sources.list | head -n1 | awk '{print $3}')
-echo "$old_repo is this machines OS version."
+echo "Detected current Debian codename: $old_repo"
 
-codename=$(curl -s https://deb.debian.org/debian/dists/stable/Release | awk '/^Codename:/ {print $2}')
-echo "$codename is the current stable OS version."
+# Fetch Debian stable codename
+codename=$(curl -s https://deb.debian.org/debian/dists/stable/Release \
+    | awk '/^Codename:/ {print $2}')
+
+if [[ -z "$codename" ]]; then
+    error_exit "Unable to fetch Debian stable codename"
+fi
+
+echo "Current Debian stable codename: $codename"
 
 if [[ "$old_repo" == "$codename" ]]; then
-    echo "You are on the newest version of Debian exiting..."
+    echo "System is already on the latest Debian release."
     exit 0
-else
-    echo "You are on $old_repo the newest is $codename."
-    echo "Updating the sources list repository..."
-    codename=$new_repo
 fi
 
-# Execute sed commands
-sed -i "s/$old_repo/$new_repo/g" /etc/apt/sources.list
-sed -i "s/$old_repo/$new_repo/g" /etc/apt/sources.list.d/pve-enterprise.list
+new_repo="$codename"
+echo "Upgrading Debian codename: $old_repo → $new_repo"
 
-# Step 4: Verify changes
-if ! grep -q "$new_repo" /etc/apt/sources.list; then
-    error_exit "Failed to update /etc/apt/sources.list with the new repo."
-fi
+##############################################
+# Step 4: Update repository files
+##############################################
 
-if ! grep -q "$new_repo" /etc/apt/sources.list.d/pve-enterprise.list; then
-    error_exit "Failed to update /etc/apt/sources.list.d/pve-enterprise.list with the new repo."
-fi
+update_repo_file() {
+    local file="$1"
+    if [[ -f "$file" ]]; then
+        sed -i "s/$old_repo/$new_repo/g" "$file"
+        echo "Updated $file"
+    else
+        echo "Skipping missing file: $file"
+    fi
+}
 
-echo "Repositories updated successfully."
+update_repo_file /etc/apt/sources.list
+update_repo_file /etc/apt/sources.list.d/pve-enterprise.list
+update_repo_file /etc/apt/sources.list.d/pve-no-subscription.list
 
-# Step 6: Final update to Proxmox
-echo "Running final Proxmox update..."
+##############################################
+# Step 5: Verify changes
+##############################################
+
+verify_repo_file() {
+    local file="$1"
+    if [[ -f "$file" ]] && ! grep -q "$new_repo" "$file"; then
+        error_exit "Failed to update $file with new codename"
+    fi
+}
+
+verify_repo_file /etc/apt/sources.list
+verify_repo_file /etc/apt/sources.list.d/pve-enterprise.list
+verify_repo_file /etc/apt/sources.list.d/pve-no-subscription.list
+
+echo "Repository files updated successfully."
+
+##############################################
+# Step 6: Final upgrade
+##############################################
+
+echo "Running final apt update..."
 apt update
 
-echo "Running final dist-upgrade for Proxmox..."
-apt dist-upgrade
+echo "Running final dist-upgrade..."
+apt dist-upgrade -y
 
-echo "Proxmox upgrade completed successfully."
+echo "Upgrade completed. A reboot is recommended."
