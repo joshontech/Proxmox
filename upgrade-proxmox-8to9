@@ -1,0 +1,74 @@
+#!/bin/sh
+
+# Pre-rec Checking.
+echo "Checking Proxmox version..."
+pve_version=$(pveversion | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+
+if [[ "$pve_version" < 8.4.1 ]]; then
+  echo "Your pve version is not 8.4.1 or higher exiting script..."
+  exit 1
+else if [[ "$pve_version" >= 9 ]]; then
+  echo "Your pve version is 9 or greater."
+  echo "Congratulations you have already upgraded!"
+  echo "Exiting script..."
+else
+  echo "Your pve version is 8.4.1 or newer continuing..."    
+fi
+
+# Step 1: Check to see if upgrade is safe to be done.
+pve8to9 --full
+
+read -p "Continue? (y/n) " answer
+
+case "$answer" in
+    [Yy]* ) echo "Continuing...";;
+    [Nn]* ) echo "Exiting..."; exit;;
+    * ) echo "Please answer y or n.";;
+esac
+
+# Step 2: Update and Upgrade before going to 9
+echo "Running system update..."
+apt update
+
+echo "Running system dist-upgrade..."n
+apt dist-upgrade
+
+# Step 3: Get debian versions for replacement in sources.list
+old_repo=$(grep "^deb " /etc/apt/sources.list | head -n1 | awk '{print $3}')
+echo "$old_repo is this machines OS version."
+
+codename=$(curl -s https://deb.debian.org/debian/dists/stable/Release | awk '/^Codename:/ {print $2}')
+echo "$codename is the current stable OS version."
+
+if [[ "$old_repo" == "$codename" ]]; then
+    echo "You are on the newest version of Debian exiting..."
+    exit 0
+else
+    echo "You are on $old_repo the newest is $codename."
+    echo "Updating the sources list repository..."
+    codename=$new_repo
+fi
+
+# Execute sed commands
+sed -i "s/$old_repo/$new_repo/g" /etc/apt/sources.list
+sed -i "s/$old_repo/$new_repo/g" /etc/apt/sources.list.d/pve-enterprise.list
+
+# Step 4: Verify changes
+if ! grep -q "$new_repo" /etc/apt/sources.list; then
+    error_exit "Failed to update /etc/apt/sources.list with the new repo."
+fi
+
+if ! grep -q "$new_repo" /etc/apt/sources.list.d/pve-enterprise.list; then
+    error_exit "Failed to update /etc/apt/sources.list.d/pve-enterprise.list with the new repo."
+fi
+
+echo "Repositories updated successfully."
+
+# Step 6: Final update to Proxmox
+echo "Running final Proxmox update..."
+apt update
+
+echo "Running final dist-upgrade for Proxmox..."
+apt dist-upgrade
+
+echo "Proxmox upgrade completed successfully."
